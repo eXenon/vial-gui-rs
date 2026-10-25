@@ -1,0 +1,13 @@
+# Cross-compilation configuration.
+#
+# To build a Windows binary from Linux/macOS, install a MinGW-w64 toolchain and
+# run:  cargo build --release --target x86_64-pc-windows-gnu
+#
+# Alternatively, build natively on Windows with MSVC (no config needed):
+#   cargo build --release
+#
+# Or use `cargo-zigbuild` (requires `zig`) for an all-in-one cross toolchain:
+#   cargo zigbuild --release --target x86_64-pc-windows-gnu
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
