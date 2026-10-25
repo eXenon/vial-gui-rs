@@ -43,7 +43,8 @@ struct Geom {
     rot_x: f32,
     rot_y: f32,
     angle: f32,
-    // mask rect (for masked keys)
+    // Upper area (outer legend) and lower area (inner legend) for masked keys.
+    nonmask_rect: Option<(f32, f32, f32, f32)>,
     mask_rect: Option<(f32, f32, f32, f32)>,
 }
 
@@ -62,16 +63,24 @@ fn key_geom(desc: &Key, unit: f32) -> Geom {
     let rot_y = size * desc.rotation_y;
     let has2 = desc.width2 != desc.width || desc.height2 != desc.height || desc.x2 != 0.0 || desc.y2 != 0.0;
 
-    let mask_rect = if desc.encoder_idx.is_none() {
-        // same calculation as keyboard_widget.py (only meaningful for masked keys)
-        Some((
-            x + size * SHADOW_SIDE_PADDING,
-            y + h * (1.0 - KEYBOARD_WIDGET_MASK_HEIGHT),
-            w - 2.0 * size * SHADOW_SIDE_PADDING,
-            h * KEYBOARD_WIDGET_MASK_HEIGHT - size * SHADOW_BOTTOM_PADDING,
-        ))
+    let (nonmask_rect, mask_rect) = if desc.encoder_idx.is_none() {
+        // Same calculations as keyboard_widget.py (only meaningful for masked keys).
+        (
+            Some((
+                x,
+                y + size * KEYBOARD_WIDGET_NONMASK_PADDING,
+                w,
+                h * (1.0 - KEYBOARD_WIDGET_MASK_HEIGHT),
+            )),
+            Some((
+                x + size * SHADOW_SIDE_PADDING,
+                y + h * (1.0 - KEYBOARD_WIDGET_MASK_HEIGHT),
+                w - 2.0 * size * SHADOW_SIDE_PADDING,
+                h * KEYBOARD_WIDGET_MASK_HEIGHT - size * SHADOW_BOTTOM_PADDING,
+            )),
+        )
     } else {
-        None
+        (None, None)
     };
 
     Geom {
@@ -87,6 +96,7 @@ fn key_geom(desc: &Key, unit: f32) -> Geom {
         rot_x,
         rot_y,
         angle: desc.rotation_angle,
+        nonmask_rect,
         mask_rect,
     }
 }
@@ -132,19 +142,21 @@ fn point_in_poly(p: Pos2, poly: &[Pos2]) -> bool {
     inside
 }
 
-/// Draw the keyboard and return a hit if a key was clicked this frame.
+/// Draw the keyboard and return `(hit, clicked)` — `clicked` is true if the
+/// user clicked anywhere in the canvas (including empty space).
 pub fn show(
     ui: &mut egui::Ui,
     keys: &[DrawKey],
     unit: f32,
     active: Option<&(KeyTarget, bool)>,
-) -> Option<KeyboardHit> {
+) -> (Option<KeyboardHit>, bool) {
     // Layout pass: compute all geometries and overall bounds.
     struct Placed<'a> {
         dk: &'a DrawKey<'a>,
         geom: Geom,
         primary: Vec<Pos2>,
         secondary: Option<Vec<Pos2>>,
+        nonmask: Option<Vec<Pos2>>,
         mask: Option<Vec<Pos2>>,
         decal: bool,
     }
@@ -175,6 +187,15 @@ pub fn show(
         } else {
             None
         };
+        let nonmask = geom.nonmask_rect.map(|(mx, my, mw, mh)| {
+            rect_poly(
+                Rect::from_min_size(pos2(mx, my), vec2(mw, mh)),
+                geom.rot_x,
+                geom.rot_y,
+                geom.angle,
+                Vec2::ZERO,
+            )
+        });
         let mask = geom.mask_rect.map(|(mx, my, mw, mh)| {
             rect_poly(
                 Rect::from_min_size(pos2(mx, my), vec2(mw, mh)),
@@ -207,13 +228,14 @@ pub fn show(
             geom,
             primary,
             secondary,
+            nonmask,
             mask,
             decal: dk.desc.decal,
         });
     }
 
     if min_x == f32::MAX {
-        return None;
+        return (None, false);
     }
 
     let shift = vec2(KEYBOARD_WIDGET_PADDING - min_x, KEYBOARD_WIDGET_PADDING - min_y);
@@ -233,6 +255,11 @@ pub fn show(
         }
         if let Some(s) = p.secondary.as_mut() {
             for v in s.iter_mut() {
+                *v += shift + origin;
+            }
+        }
+        if let Some(n) = p.nonmask.as_mut() {
+            for v in n.iter_mut() {
                 *v += shift + origin;
             }
         }
@@ -298,15 +325,18 @@ pub fn show(
             }
 
             if p.dk.masked {
-                // Outer legend.
-                painter.text(
-                    top.center(),
-                    Align2::CENTER_CENTER,
-                    &p.dk.text,
-                    FontId::proportional(unit * 0.5),
-                    text_color,
-                );
-                // Mask area.
+                // Outer legend in the upper (non-mask) area.
+                if let Some(n) = &p.nonmask {
+                    let nr = polygon_rect(n);
+                    painter.text(
+                        nr.center(),
+                        Align2::CENTER_CENTER,
+                        &p.dk.text,
+                        FontId::proportional(unit * 0.5),
+                        text_color,
+                    );
+                }
+                // Mask area (inner legend).
                 if let Some(m) = &p.mask {
                     let mr = polygon_rect(m);
                     let mr = mr.shrink(0.0);
@@ -337,8 +367,9 @@ pub fn show(
     }
 
     // Hit test.
+    let clicked = response.clicked();
     let mut hit: Option<KeyboardHit> = None;
-    if response.clicked() {
+    if clicked {
         if let Some(pointer) = response.interact_pointer_pos() {
             // Iterate in reverse draw order (topmost first).
             for p in placed.iter().rev() {
@@ -367,7 +398,7 @@ pub fn show(
         }
     }
 
-    hit
+    (hit, clicked)
 }
 
 fn polygon_rect(poly: &[Pos2]) -> Rect {

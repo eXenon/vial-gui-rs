@@ -374,22 +374,53 @@ impl App {
     }
 
     fn set_key(&mut self, code: &str) {
-        let target = match self.active {
-            Some((t, _)) => t,
+        let (target, mask) = match self.active {
+            Some((t, m)) => (t, m),
             None => return,
         };
         let layer = self.current_layer;
+
+        // If editing the inner part of a composite keycode (e.g. `LCTL(kc)`),
+        // compose the outer keycode with the newly chosen inner keycode.
+        let code_to_set: String;
+        if mask {
+            let Some(kb) = &self.keyboard else { return };
+            let db = &kb.keycode_db;
+            if !db.is_basic(code) {
+                self.status = Some("Inner keycode must be a basic key".to_string());
+                return;
+            }
+            let current = match target {
+                KeyTarget::Matrix(r, c) => kb
+                    .layout
+                    .get(&(layer, r, c))
+                    .cloned()
+                    .unwrap_or_default(),
+                KeyTarget::Encoder(idx, dir) => kb
+                    .encoder_layout
+                    .get(&(layer, idx, dir))
+                    .cloned()
+                    .unwrap_or_default(),
+            };
+            let Some(outer) = db.find_outer_keycode(&current) else {
+                return;
+            };
+            code_to_set = outer.qmk_id.replace("(kc)", &format!("({})", code));
+        } else {
+            code_to_set = code.to_string();
+        }
+
         let result = match target {
             KeyTarget::Matrix(r, c) => {
                 if let Some(kb) = &mut self.keyboard {
-                    kb.set_key(layer, r, c, code)
+                    kb.set_key(layer, r, c, &code_to_set)
                 } else {
                     Ok(())
                 }
             }
             KeyTarget::Encoder(idx, dir) => {
                 if let Some(kb) = &mut self.keyboard {
-                    kb.set_encoder(layer, idx, dir, code)
+                    kb.set_encoder(layer, idx, dir, &code_to_set)
                 } else {
                     Ok(())
                 }
@@ -409,7 +440,7 @@ impl App {
         let mut scale = self.scale;
         let mut tray_tab = self.tray_tab;
 
-        let (hit, tray_code, any_requested) = match &self.keyboard {
+        let (hit, clicked, tray_code, any_requested) = match &self.keyboard {
             Some(kb) => {
                 let mut tray_code: Option<String> = None;
                 let mut any_requested = false;
@@ -477,17 +508,22 @@ impl App {
                 }
 
                 let unit = 14.0 * scale;
-                let hit = keyboard::show(ui, &draw_keys, unit, self.active.as_ref());
+                let (hit, clicked) = keyboard::show(ui, &draw_keys, unit, self.active.as_ref());
 
-                // Tray.
-                if let Some(action) = keycode_tray::show(ui, db, &mut tray_tab) {
+                // Tray (filter to basic keycodes when editing a masked inner key).
+                let masked_filter = self.active.map(|(_, m)| m).unwrap_or(false);
+                if let Some(action) = keycode_tray::show(ui, db, &mut tray_tab, masked_filter) {
                     match action {
                         TrayAction::Keycode(code) => tray_code = Some(db.normalize(&code)),
                         TrayAction::Any => any_requested = true,
                     }
                 }
 
-                (hit, tray_code, any_requested)
+                // Save RGB (same button as the Lighting tab).
+                ui.separator();
+                crate::ui::rgb::save_button(ui, kb);
+
+                (hit, clicked, tray_code, any_requested)
             }
             None => {
                 ui.centered_and_justified(|ui| {
@@ -495,7 +531,7 @@ impl App {
                         "No device selected. Connect a Vial-compatible device and press \"Refresh\",\nor use File → Download VIA definitions to enable VIA keyboard support.",
                     );
                 });
-                (None, None, false)
+                (None, false, None, false)
             }
         };
 
@@ -505,18 +541,36 @@ impl App {
         self.tray_tab = tray_tab;
         if let Some(h) = hit {
             self.active = Some((h.target, h.mask));
+        } else if clicked {
+            // Clicked empty space: deselect.
+            self.active = None;
         }
         if let Some(code) = tray_code {
             self.set_key(&code);
         }
         if any_requested {
-            let current = self
-                .active
-                .map(|(t, _)| self.code_for(t))
-                .unwrap_or_default();
+            let current = self.any_dialog_default();
             self.show_any_dialog = true;
             self.any_input = current;
         }
+    }
+
+    /// The initial text for the "Any keycode" dialog. When editing the inner
+    /// part of a composite keycode, show the inner keycode instead of the full one.
+    fn any_dialog_default(&self) -> String {
+        let (target, mask) = match self.active {
+            Some((t, m)) => (t, m),
+            None => return String::new(),
+        };
+        let code = self.code_for(target);
+        if mask {
+            if let Some(kb) = &self.keyboard {
+                if let Some(inner) = kb.keycode_db.find_inner_keycode(&code) {
+                    return inner.qmk_id.clone();
+                }
+            }
+        }
+        code
     }
 
     fn rgb_panel(&mut self, ui: &mut egui::Ui) {

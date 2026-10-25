@@ -91,7 +91,14 @@ pub enum TrayAction {
 }
 
 /// Draw the keycode tray. Returns an action if a keycode was chosen.
-pub fn show(ui: &mut Ui, db: &KeycodeDb, tab: &mut TrayTab) -> Option<TrayAction> {
+/// When `masked_filter` is set, only basic (byte-sized) keycodes are shown —
+/// used when editing the inner key of a composite keycode like `LCTL(kc)`.
+pub fn show(
+    ui: &mut Ui,
+    db: &KeycodeDb,
+    tab: &mut TrayTab,
+    masked_filter: bool,
+) -> Option<TrayAction> {
     let mut action = None;
 
     ui.horizontal(|ui| {
@@ -110,7 +117,11 @@ pub fn show(ui: &mut Ui, db: &KeycodeDb, tab: &mut TrayTab) -> Option<TrayAction
     }
     ui.separator();
 
-    let qmk_ids = tab.qmk_ids(db);
+    let qmk_ids: Vec<String> = tab
+        .qmk_ids(db)
+        .into_iter()
+        .filter(|id| !masked_filter || db.is_basic(id))
+        .collect();
 
     let label_for = |qmk_id: &str| -> String {
         let label = db.label(qmk_id);

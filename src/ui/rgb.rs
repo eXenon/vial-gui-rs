@@ -21,11 +21,23 @@ pub fn show(ui: &mut Ui, kb: &mut Keyboard, selected_layer: &mut usize) {
         ui.separator();
     }
 
-    if ui.button("Save").clicked() {
-        if let Err(e) = kb.save_rgb() {
-            log::warn!("save_rgb failed: {}", e);
+    save_button(ui, kb);
+}
+
+/// A "Save" button (with hint) that persists RGB config to the keyboard's EEPROM.
+/// Reused on both the Lighting and Keymap tabs.
+pub fn save_button(ui: &mut Ui, kb: &Keyboard) {
+    ui.horizontal(|ui| {
+        ui.colored_label(
+            egui::Color32::from_rgb(0xcc, 0xa8, 0x50),
+            "Changes apply live — press “Save” to persist them to the keyboard.",
+        );
+        if ui.button("Save").clicked() {
+            if let Err(e) = kb.save_rgb() {
+                log::warn!("save_rgb failed: {}", e);
+            }
         }
-    }
+    });
 }
 
 fn show_vialrgb(ui: &mut Ui, kb: &mut Keyboard, selected_layer: &mut usize) {
