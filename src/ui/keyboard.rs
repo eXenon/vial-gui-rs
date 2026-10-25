@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // egui keyboard rendering widget (port of widgets/keyboard_widget.py).
 
+use std::collections::HashSet;
+
 use egui::{pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::constants::*;
@@ -399,6 +401,134 @@ pub fn show(
     }
 
     (hit, clicked)
+}
+
+/// Draw a tile per key for the per-key lighting painter. Keys in `off` are drawn
+/// dark ("no light"); the rest are drawn lit. Returns the (row, col) of a clicked
+/// key, or `None`. Only keys that carry a matrix (row, col) should be passed in.
+pub fn show_lighting(
+    ui: &mut egui::Ui,
+    keys: &[&Key],
+    unit: f32,
+    off: &HashSet<(usize, usize)>,
+) -> Option<(usize, usize)> {
+    struct Placed<'a> {
+        key: &'a Key,
+        primary: Vec<Pos2>,
+        secondary: Option<Vec<Pos2>>,
+    }
+
+    let mut placed: Vec<Placed> = Vec::new();
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+
+    for k in keys {
+        let geom = key_geom(k, unit);
+        let primary = rect_poly(
+            Rect::from_min_size(pos2(geom.x, geom.y), vec2(geom.w, geom.h)),
+            geom.rot_x,
+            geom.rot_y,
+            geom.angle,
+            Vec2::ZERO,
+        );
+        let secondary = if geom.has2 {
+            Some(rect_poly(
+                Rect::from_min_size(pos2(geom.x2, geom.y2), vec2(geom.w2, geom.h2)),
+                geom.rot_x,
+                geom.rot_y,
+                geom.angle,
+                Vec2::ZERO,
+            ))
+        } else {
+            None
+        };
+
+        for p in &primary {
+            min_x = min_x.min(p.x);
+            min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x);
+            max_y = max_y.max(p.y);
+        }
+        if let Some(s) = &secondary {
+            for p in s {
+                min_x = min_x.min(p.x);
+                min_y = min_y.min(p.y);
+                max_x = max_x.max(p.x);
+                max_y = max_y.max(p.y);
+            }
+        }
+
+        placed.push(Placed {
+            key: k,
+            primary,
+            secondary,
+        });
+    }
+
+    if min_x == f32::MAX {
+        return None;
+    }
+
+    let shift = vec2(KEYBOARD_WIDGET_PADDING - min_x, KEYBOARD_WIDGET_PADDING - min_y);
+    let canvas_size = vec2(
+        max_x - min_x + 2.0 * KEYBOARD_WIDGET_PADDING,
+        max_y - min_y + 2.0 * KEYBOARD_WIDGET_PADDING,
+    );
+
+    let (rect, response) = ui.allocate_exact_size(canvas_size, Sense::click());
+    let painter = ui.painter_at(rect);
+    let origin = rect.min.to_vec2();
+
+    for p in &mut placed {
+        for v in p.primary.iter_mut() {
+            *v += shift + origin;
+        }
+        if let Some(s) = p.secondary.as_mut() {
+            for v in s.iter_mut() {
+                *v += shift + origin;
+            }
+        }
+    }
+
+    let lit = Color32::from_gray(0x4a);
+    let dark = Color32::from_gray(0x16);
+    let corner = unit * KEY_ROUNDNESS;
+
+    for p in &placed {
+        let is_off = p
+            .key
+            .row
+            .zip(p.key.col)
+            .map(|(r, c)| off.contains(&(r, c)))
+            .unwrap_or(false);
+        let fill = if is_off { dark } else { lit };
+        draw_rounded_rect(&painter, &p.primary, corner, fill);
+        if let Some(s) = &p.secondary {
+            draw_rounded_rect(&painter, s, corner, fill);
+        }
+    }
+
+    if response.clicked() {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            for p in placed.iter().rev() {
+                let in_primary = point_in_poly(pointer, &p.primary);
+                let in_secondary = p
+                    .secondary
+                    .as_ref()
+                    .map(|s| point_in_poly(pointer, s))
+                    .unwrap_or(false);
+                if in_primary || in_secondary {
+                    if let (Some(r), Some(c)) = (p.key.row, p.key.col) {
+                        return Some((r, c));
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn polygon_rect(poly: &[Pos2]) -> Rect {

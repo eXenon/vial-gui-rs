@@ -34,9 +34,13 @@ pub const QMK_RGBLIGHT_COLOR: u8 = 0x83;
 pub const VIALRGB_GET_INFO: u8 = 0x40;
 pub const VIALRGB_GET_MODE: u8 = 0x41;
 pub const VIALRGB_GET_SUPPORTED: u8 = 0x42;
+pub const VIALRGB_GET_NUMBER_LEDS: u8 = 0x43;
+pub const VIALRGB_GET_LED_INFO: u8 = 0x44;
 pub const VIALRGB_GET_LAYER: u8 = 0x45;
+pub const VIALRGB_GET_KEY_DISABLE: u8 = 0x46;
 pub const VIALRGB_SET_MODE: u8 = 0x41;
 pub const VIALRGB_SET_LAYER: u8 = 0x43;
+pub const VIALRGB_SET_KEY_DISABLE: u8 = 0x44;
 
 // Vial-specific commands (sent with CMD_VIA_VIAL_PREFIX)
 pub const CMD_VIAL_GET_KEYBOARD_ID: u8 = 0x00;

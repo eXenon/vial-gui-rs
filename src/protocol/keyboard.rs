@@ -79,6 +79,12 @@ pub struct Keyboard {
     pub rgb_hsv: (u8, u8, u8),
     pub rgb_supported_effects: HashSet<u16>,
     pub rgb_layer_configs: Vec<RgbLayerConfig>,
+
+    // VialRGB per-key "no light" mask (protocol v3)
+    pub rgb_key_disable_support: bool,
+    pub rgb_number_leds: usize,
+    pub rgb_led_matrix: Vec<Option<(usize, usize)>>, // LED index -> matrix (row, col)
+    pub rgb_key_disable: Vec<Vec<u8>>,               // per layer, one bit per LED
 }
 
 /// Per-layer VialRGB config (matches `vialrgb_layer_config_t` in the firmware).
@@ -140,6 +146,10 @@ impl Keyboard {
             rgb_hsv: (0, 0, 0),
             rgb_supported_effects: HashSet::new(),
             rgb_layer_configs: Vec::new(),
+            rgb_key_disable_support: false,
+            rgb_number_leds: 0,
+            rgb_led_matrix: Vec::new(),
+            rgb_key_disable: Vec::new(),
         }
     }
 
@@ -419,6 +429,28 @@ impl Keyboard {
             }
             self.rgb_maximum_brightness = data[4] as i32;
             self.rgb_layer_support = self.rgb_version >= 2;
+            self.rgb_key_disable_support = self.rgb_version >= 3;
+
+            if self.rgb_key_disable_support {
+                // Number of LEDs and their position in the keyboard matrix.
+                let data =
+                    self.usb_send(&[CMD_VIA_LIGHTING_GET_VALUE, VIALRGB_GET_NUMBER_LEDS], 20)?;
+                self.rgb_number_leds = u16::from_le_bytes([data[2], data[3]]) as usize;
+
+                self.rgb_led_matrix.clear();
+                for led in 0..self.rgb_number_leds {
+                    let mut msg = vec![CMD_VIA_LIGHTING_GET_VALUE, VIALRGB_GET_LED_INFO];
+                    msg.extend_from_slice(&[led as u8, (led >> 8) as u8]);
+                    let data = self.usb_send(&msg, 20)?;
+                    let row = data[5];
+                    let col = data[6];
+                    self.rgb_led_matrix.push(if row != 0xFF && col != 0xFF {
+                        Some((row as usize, col as usize))
+                    } else {
+                        None
+                    });
+                }
+            }
 
             self.rgb_supported_effects.clear();
             self.rgb_supported_effects.insert(0);
@@ -488,6 +520,18 @@ impl Keyboard {
                 self.rgb_speed = data[4] as i32;
                 self.rgb_hsv = (data[5], data[6], data[7]);
                 self.rgb_layer_configs.clear();
+            }
+
+            if self.rgb_key_disable_support {
+                let nbytes = (self.rgb_number_leds + 7) / 8;
+                self.rgb_key_disable.clear();
+                for layer in 0..self.layers {
+                    let data = self.usb_send(
+                        &[CMD_VIA_LIGHTING_GET_VALUE, VIALRGB_GET_KEY_DISABLE, layer as u8],
+                        20,
+                    )?;
+                    self.rgb_key_disable.push(data[2..2 + nbytes].to_vec());
+                }
             }
         }
         Ok(())
@@ -660,6 +704,77 @@ impl Keyboard {
         self.rgb_speed = speed as i32;
         self.rgb_hsv = (hue, sat, val);
         self.vialrgb_set_mode()
+    }
+
+    // --- VialRGB per-key "no light" mask ---
+
+    /// LED indices that illuminate the given key (empty if the key has no LED).
+    pub fn rgb_leds_for_key(&self, row: usize, col: usize) -> Vec<usize> {
+        self.rgb_led_matrix
+            .iter()
+            .enumerate()
+            .filter_map(|(led, m)| m.filter(|(r, c)| *r == row && *c == col).map(|_| led))
+            .collect()
+    }
+
+    /// Whether the given key has its light turned off on `layer`.
+    pub fn rgb_key_disabled(&self, layer: usize, row: usize, col: usize) -> bool {
+        let Some(mask) = self.rgb_key_disable.get(layer) else {
+            return false;
+        };
+        self.rgb_leds_for_key(row, col)
+            .iter()
+            .any(|&led| mask[led / 8] & (1 << (led % 8)) != 0)
+    }
+
+    /// Set the "no light" state for every LED of a key on the given layer.
+    pub fn set_vialrgb_key_disable(
+        &mut self,
+        layer: usize,
+        row: usize,
+        col: usize,
+        disabled: bool,
+    ) -> Result<(), String> {
+        let leds = self.rgb_leds_for_key(row, col);
+        if leds.is_empty() {
+            return Ok(());
+        }
+
+        let mask: Vec<u8> = {
+            let Some(slot) = self.rgb_key_disable.get_mut(layer) else {
+                return Err("invalid layer".to_string());
+            };
+            for led in &leds {
+                let byte = led / 8;
+                let bit = 1 << (led % 8);
+                if disabled {
+                    slot[byte] |= bit;
+                } else {
+                    slot[byte] &= !bit;
+                }
+            }
+            slot.clone()
+        };
+
+        let mut msg = vec![CMD_VIA_LIGHTING_SET_VALUE, VIALRGB_SET_KEY_DISABLE, layer as u8];
+        msg.extend_from_slice(&mask);
+        self.usb_send(&msg, 20)?;
+        Ok(())
+    }
+
+    /// Set a full per-layer mask in a single packet (for restore).
+    pub fn set_vialrgb_key_disable_mask(&mut self, layer: usize, mask: &[u8]) -> Result<(), String> {
+        let nbytes = (self.rgb_number_leds + 7) / 8;
+        if mask.len() < nbytes {
+            return Err("mask too short".to_string());
+        }
+        if let Some(slot) = self.rgb_key_disable.get_mut(layer) {
+            slot.copy_from_slice(&mask[..nbytes]);
+        }
+        let mut msg = vec![CMD_VIA_LIGHTING_SET_VALUE, VIALRGB_SET_KEY_DISABLE, layer as u8];
+        msg.extend_from_slice(&mask[..nbytes]);
+        self.usb_send(&msg, 20)?;
+        Ok(())
     }
 
     fn reload_keymap(&mut self) -> Result<(), String> {
@@ -886,6 +1001,14 @@ impl Keyboard {
                 vialrgb.insert("sat".to_string(), serde_json::json!(self.rgb_hsv.1));
                 vialrgb.insert("val".to_string(), serde_json::json!(self.rgb_hsv.2));
             }
+            if self.rgb_key_disable_support {
+                let masks: Vec<Value> = self
+                    .rgb_key_disable
+                    .iter()
+                    .map(|m| Value::Array(m.iter().map(|&b| serde_json::json!(b)).collect()))
+                    .collect();
+                vialrgb.insert("key_disable".to_string(), Value::Array(masks));
+            }
             rgb.insert("vialrgb".to_string(), Value::Object(vialrgb));
         }
         if self.lighting_qmk_rgblight {
@@ -995,6 +1118,25 @@ impl Keyboard {
                     let sat = vialrgb.get("sat").and_then(Value::as_u64).unwrap_or(0) as u8;
                     let val = vialrgb.get("val").and_then(Value::as_u64).unwrap_or(0) as u8;
                     self.set_vialrgb_config(mode, speed, hue, sat, val)?;
+                }
+
+                if self.rgb_key_disable_support {
+                    if let Some(masks) = vialrgb.get("key_disable").and_then(Value::as_array) {
+                        for (layer, mask) in masks.iter().enumerate() {
+                            if layer >= self.rgb_key_disable.len() {
+                                break;
+                            }
+                            let bytes: Vec<u8> = mask
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|v| v.as_u64().map(|n| n as u8))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            self.set_vialrgb_key_disable_mask(layer, &bytes)?;
+                        }
+                    }
                 }
             }
         }

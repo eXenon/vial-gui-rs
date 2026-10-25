@@ -139,6 +139,33 @@ fn show_vialrgb(ui: &mut Ui, kb: &mut Keyboard, selected_layer: &mut usize) {
             kb.set_vialrgb_speed(speed)
         };
     }
+
+    // Per-key "no light" painter (requires VialRGB protocol >= 3).
+    if kb.rgb_key_disable_support && has_layer {
+        ui.separator();
+        egui::CollapsingHeader::new("Per-key lighting")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label("Click a key to turn its light off on this layer. Every other key keeps the selected effect.");
+                let hit = {
+                    let keys: Vec<&crate::kle::Key> = kb
+                        .keys
+                        .iter()
+                        .filter(|k| k.row.is_some() && k.col.is_some())
+                        .collect();
+                    let off: std::collections::HashSet<(usize, usize)> = keys
+                        .iter()
+                        .filter(|k| kb.rgb_key_disabled(layer, k.row.unwrap(), k.col.unwrap()))
+                        .map(|k| (k.row.unwrap(), k.col.unwrap()))
+                        .collect();
+                    crate::ui::keyboard::show_lighting(ui, &keys, 12.0, &off)
+                };
+                if let Some((row, col)) = hit {
+                    let disabled = kb.rgb_key_disabled(layer, row, col);
+                    let _ = kb.set_vialrgb_key_disable(layer, row, col, !disabled);
+                }
+            });
+    }
 }
 
 fn show_qmk_rgblight(ui: &mut Ui, kb: &mut Keyboard) {
